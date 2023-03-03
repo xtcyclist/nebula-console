@@ -48,6 +48,8 @@ var dataSetPrinter = printer.NewDataSetPrinter()
 
 var planDescPrinter = printer.NewPlanDescPrinter()
 
+var globalInTransaction = false
+
 // Every statement will be repeatedly executed `g_repeats` times,
 // in order to get the total and avearge execution time of the statement"
 var g_repeats = 1
@@ -280,6 +282,34 @@ func executeConsoleCmd(c cli.Cli, cmd int, args []string) {
 	}
 }
 
+func inTransaction(cmd string) {
+	if strings.Contains(strings.ToLower(cmd), strings.ToLower("begin")) {
+		fmt.Println("Begin transaction.")
+		globalInTransaction = true
+	}
+}
+
+func endTransaction(cmd string) (endTransaction bool) {
+	endTransaction = false
+	if globalInTransaction && (strings.Contains(strings.ToLower(cmd), strings.ToLower("commit")) || strings.Contains(strings.ToLower(cmd), strings.ToLower("rollback"))) {
+		globalInTransaction = false
+		endTransaction = true
+		if strings.Contains(strings.ToLower(cmd), strings.ToLower("commit")) {
+			fmt.Println("Commit transaction.")
+		} else {
+			fmt.Println("Rollback transaction.")
+		}
+	}
+	return
+}
+
+func mergeTransactionBuffer(buffer []string) (query string) {
+	for _, value := range buffer {
+		query = query + value + ";"
+	}
+	return
+}
+
 func printResultSet(res *nebulago.ResultSet, startTime time.Time) (duration time.Duration) {
 	if !res.IsSucceed() && !res.IsPartialSucceed() {
 		fmt.Printf("[ERROR (%d)]: %s", res.GetErrorCode(), res.GetErrorMsg())
@@ -327,6 +357,7 @@ func printResultSet(res *nebulago.ResultSet, startTime time.Time) (duration time
 // We treat one line as one query
 // Add line break yourself as `SHOW \<CR>HOSTS`
 func loop(c cli.Cli) error {
+	var transactionBuffer []string
 	for {
 		line, exit, err := c.ReadLine()
 		if err != nil {
@@ -337,6 +368,24 @@ func loop(c cli.Cli) error {
 			return nil
 		}
 		if len(line) == 0 { // 1). The line input is empty, or 2). user presses ctrlC so the input is truncated
+			continue
+		}
+		if endTransaction := endTransaction(line); endTransaction {
+			// Console side command
+			transactionBuffer = append(transactionBuffer, line)
+			for i, s := range transactionBuffer {
+				if isLocal, cmd, args := isConsoleCmd(s); isLocal {
+					if cmd == Quit {
+						return nil
+					}
+					executeConsoleCmd(c, cmd, args)
+					transactionBuffer = append(transactionBuffer[:i], transactionBuffer[i+1:]...)
+				}
+			}
+			line = mergeTransactionBuffer(transactionBuffer)
+			// fmt.Printf("Transaction issues: %s\n", line)
+		} else if inTransaction(line); globalInTransaction {
+			transactionBuffer = append(transactionBuffer, line)
 			continue
 		}
 		// Console side command
@@ -376,6 +425,9 @@ func loop(c cli.Cli) error {
 			fmt.Println()
 		}
 		g_repeats = 1
+		if !globalInTransaction {
+			transactionBuffer = nil
+		}
 	}
 }
 
